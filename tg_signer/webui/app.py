@@ -1077,6 +1077,7 @@ def log_block() -> Callable[[], None]:
                 .classes("w-full gap-0 p-3 font-mono text-sm")
                 .style("white-space: pre;")
             )
+        last_synced_log_path = {"value": str(state.log_path)}
 
         def classify_line(line: str) -> str:
             upper = line.upper()
@@ -1107,6 +1108,7 @@ def log_block() -> Callable[[], None]:
             log_select.update()
             log_path_input.value = current_path
             log_path_input.update()
+            last_synced_log_path["value"] = current_path
 
         def select_log_file(path_value: str | None) -> None:
             if not path_value:
@@ -1119,15 +1121,27 @@ def log_block() -> Callable[[], None]:
                 state.log_limit = int(limit_input.value or state.log_limit)
             except ValueError:
                 state.log_limit = 200
-            state.set_log_path(log_path_input.value or str(DEFAULT_LOG_FILE))
+            input_path = str(log_path_input.value or "").strip()
+            if input_path and input_path != last_synced_log_path["value"]:
+                state.set_log_path(input_path)
             refresh_log_options()
             path, lines = load_logs(state.log_limit, state.log_path)
             log_list.clear()
             if not lines:
                 with log_list:
-                    ui.label(f"未找到日志文件: {path}").classes("text-gray-500 text-sm")
+                    if path.is_file():
+                        ui.label(f"日志文件存在但当前还没有内容: {path}").classes(
+                            "text-gray-500 text-sm"
+                        )
+                    else:
+                        ui.label(f"未找到日志文件: {path}").classes(
+                            "text-gray-500 text-sm"
+                        )
                 log_list.update()
-                refresh_status(f"未找到日志文件: {path}")
+                if path.is_file():
+                    refresh_status(f"日志文件为空: {path}")
+                else:
+                    refresh_status(f"未找到日志文件: {path}")
                 return
 
             with log_list:
