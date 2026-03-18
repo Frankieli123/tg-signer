@@ -1,7 +1,7 @@
-from typing import Callable, List, Optional
+import re
+from typing import Callable, Dict, List, Optional, Sequence
 
 from nicegui import ui
-from nicegui.events import ValueChangeEventArguments
 from pydantic import ValidationError
 
 from tg_signer.config import (
@@ -16,6 +16,55 @@ from tg_signer.config import (
     SupportAction,
 )
 from tg_signer.webui.data import load_user_infos, save_config
+
+
+def parse_chat_ids(value: object) -> list[int]:
+    if value is None:
+        raise ValueError("Chat ID不能为空")
+    if isinstance(value, int):
+        return [value]
+    text = str(value).strip()
+    if not text:
+        raise ValueError("Chat ID不能为空")
+    chat_ids = []
+    for item in re.split(r"[\s,，;；]+", text):
+        if not item:
+            continue
+        try:
+            chat_id = int(item)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"Chat ID必须是整数，非法值: {item}") from e
+        if chat_id not in chat_ids:
+            chat_ids.append(chat_id)
+    if not chat_ids:
+        raise ValueError("Chat ID不能为空")
+    return chat_ids
+
+
+def build_sign_chats(
+    chat_ids: Sequence[int],
+    *,
+    message_thread_id: Optional[int],
+    name: str,
+    delete_after: Optional[int],
+    actions: Sequence[ActionT],
+    chat_labels: Optional[Dict[int, str]] = None,
+) -> list[SignChatV3]:
+    normalized_name = (name or "").strip()
+    labels = chat_labels or {}
+    chats = []
+    for chat_id in chat_ids:
+        chat_name = normalized_name or labels.get(chat_id) or None
+        chats.append(
+            SignChatV3(
+                chat_id=chat_id,
+                message_thread_id=message_thread_id,
+                name=chat_name,
+                delete_after=delete_after,
+                actions=[action.model_copy(deep=True) for action in actions],
+            )
+        )
+    return chats
 
 
 class InteractiveSignerConfig:
@@ -152,6 +201,8 @@ class InteractiveSignerConfig:
         d_name = chat.name if chat else ""
         d_delete_after = chat.delete_after if chat else None
         d_actions: List[ActionT] = list(chat.actions) if chat else []
+        selected_chat_labels: Dict[int, str] = {}
+        use_imported_labels = {"value": False}
 
         dialog = ui.dialog()
         with dialog, ui.card().classes("w-full max-w-2xl"):
@@ -168,26 +219,13 @@ class InteractiveSignerConfig:
 
                 with ui.dialog() as import_dialog, ui.card().classes("w-full max-w-lg"):
                     ui.label("从最近聊天快速导入").classes("text-lg font-bold mb-4")
-
-                    def on_chat_select(e: ValueChangeEventArguments):
-                        selected_chat = e.value
-                        if not selected_chat:
-                            return
-
-                        chat_id, label = selected_chat
-                        # Auto fill ID
-                        id_input.value = chat_id
-
-                        # Auto fill name if empty
-                        if not name_input.value:
-                            name_input.value = label
-
-                        import_dialog.close()
+                    chat_label_map: Dict[int, str] = {}
 
                     def on_user_select(e):
                         user_id = e.value
                         chat_select.options = {}
                         chat_select.value = None
+                        chat_label_map.clear()
 
                         if not user_id:
                             chat_select.disable()
@@ -199,17 +237,44 @@ class InteractiveSignerConfig:
                         if target_user and target_user.latest_chats:
                             options = {}
                             for c in target_user.latest_chats:
+                                chat_id = int(c["id"])
                                 label = c.get("title") or c.get("first_name") or "N/A"
                                 username = c.get("username")
                                 if username:
                                     label += f" (@{username})"
-                                value = (c["id"], label)
-                                options[value] = label
+                                options[chat_id] = f"{label} [{chat_id}]"
+                                chat_label_map[chat_id] = label
                             chat_select.options = options
                             chat_select.enable()
                         else:
                             chat_select.disable()
                             ui.notify("该用户无最近聊天记录", type="warning")
+
+                    def confirm_import():
+                        selected_values = chat_select.value or []
+                        if isinstance(selected_values, (str, int)):
+                            selected_values = [selected_values]
+                        chat_ids = []
+                        labels = {}
+                        for value in selected_values:
+                            chat_id = int(value)
+                            if chat_id in chat_ids:
+                                continue
+                            chat_ids.append(chat_id)
+                            if chat_id in chat_label_map:
+                                labels[chat_id] = chat_label_map[chat_id]
+                        if not chat_ids:
+                            ui.notify("请至少选择一个聊天", type="warning")
+                            return
+                        id_input.value = ", ".join(str(chat_id) for chat_id in chat_ids)
+                        id_input.update()
+                        selected_chat_labels.clear()
+                        selected_chat_labels.update(labels)
+                        use_imported_labels["value"] = bool(labels)
+                        if len(chat_ids) == 1 and not name_input.value:
+                            name_input.value = labels.get(chat_ids[0], "")
+                            name_input.update()
+                        import_dialog.close()
 
                     with ui.column().classes("w-full gap-4"):
                         user_options = {
@@ -226,31 +291,43 @@ class InteractiveSignerConfig:
                         chat_select = ui.select(
                             options={},
                             label="选择聊天",
-                            on_change=on_chat_select,
                             with_input=True,
+                            multiple=True,
                         ).classes("w-full")
                         chat_select.disable()
 
-                    ui.button("取消", on_click=import_dialog.close).props(
-                        "flat"
-                    ).classes("ml-auto mt-4")
+                    with ui.row().classes("w-full justify-end mt-4 gap-2"):
+                        ui.button("取消", on_click=import_dialog.close).props("flat")
+                        ui.button("导入选中聊天", on_click=confirm_import)
 
                 import_dialog.open()
 
             with ui.grid(columns=2).classes("w-full gap-4 mb-4"):
-                id_input = (
-                    ui.input(
-                        label="Chat ID",
-                        value=str(d_chat_id) if d_chat_id else "",
-                        placeholder="整数ID (点击选择)",
-                    )
-                    .props("outlined")
-                    .on("click", show_import_dialog)
-                )
+                with ui.column().classes("col-span-2 gap-2"):
+                    with ui.row().classes("w-full items-end gap-2"):
+                        id_input = ui.input(
+                            label="Chat ID",
+                            value=str(d_chat_id) if d_chat_id else "",
+                            placeholder="支持多个，逗号/空格分隔",
+                        ).props("outlined").classes("flex-1")
+                        ui.button(
+                            "从最近聊天导入",
+                            icon="history",
+                            on_click=show_import_dialog,
+                        ).props("outline")
+                    ui.label(
+                        "添加任务时可一次填写多个 Chat ID；保存后会自动展开成多条任务。"
+                    ).classes("text-xs text-gray-500")
 
                 name_input = ui.input(label="备注名称 (可选)", value=d_name).props(
                     "outlined"
                 )
+
+                def on_name_changed(_):
+                    if selected_chat_labels:
+                        use_imported_labels["value"] = False
+
+                name_input.on_value_change(on_name_changed)
 
                 use_thread_input = ui.switch(
                     "启用话题（message_thread_id）",
@@ -401,10 +478,9 @@ class InteractiveSignerConfig:
 
             def save_chat():
                 try:
-                    try:
-                        cid = int(id_input.value)
-                    except (ValueError, TypeError):
-                        raise ValueError("Chat ID不能为空且必须是整数")
+                    chat_ids = parse_chat_ids(id_input.value)
+                    if index >= 0 and len(chat_ids) > 1:
+                        raise ValueError("编辑已有任务时只能保留一个Chat ID；如需批量添加，请新建任务")
 
                     if not d_actions:
                         raise ValueError("至少需要配置一个动作")
@@ -424,18 +500,21 @@ class InteractiveSignerConfig:
                             raise ValueError("启用话题后必须填写message_thread_id")
                         message_thread_id = int(thread_id_input.value)
 
-                    new_chat = SignChatV3(
-                        chat_id=cid,
+                    new_chats = build_sign_chats(
+                        chat_ids,
                         message_thread_id=message_thread_id,
-                        name=name_input.value.strip() or None,
+                        name=name_input.value,
                         delete_after=int(del_input.value) if del_input.value else None,
                         actions=d_actions,
+                        chat_labels=selected_chat_labels
+                        if use_imported_labels["value"]
+                        else None,
                     )
 
                     if index >= 0:
-                        self.chats[index] = new_chat
+                        self.chats[index] = new_chats[0]
                     else:
-                        self.chats.append(new_chat)
+                        self.chats.extend(new_chats)
 
                     self.refresh_chats_list()
                     dialog.close()
