@@ -221,6 +221,7 @@ def process_matches_state(state: RunnerState) -> bool:
         current_ticks = get_process_start_ticks(state.pid)
         if current_ticks is None or current_ticks != state.process_start_ticks:
             return False
+        return True
     if state.command:
         current_cmdline = get_process_cmdline(state.pid)
         if current_cmdline is None or current_cmdline != state.command:

@@ -254,6 +254,32 @@ def test_get_runner_status_marks_stale_pid_as_exited(monkeypatch, tmp_path):
     assert loaded == state
 
 
+def test_process_matches_state_accepts_same_process_with_updated_cmdline(
+    monkeypatch, tmp_path
+):
+    state = runner.RunnerState(
+        pid=1234,
+        account="acct",
+        session_dir=str(tmp_path / "sessions"),
+        workdir=str(tmp_path / ".signer"),
+        task_names=["task_a"],
+        num_of_dialogs=50,
+        wait_until_scheduled=True,
+        log_path=str(tmp_path / ".signer" / "logs" / "webui-runner.log"),
+        command=["python", "-m", "tg_signer", "old"],
+        process_start_ticks=3333,
+        started_at="2026-03-18T00:00:00+00:00",
+    )
+
+    monkeypatch.setattr(runner, "process_exists", lambda pid: True)
+    monkeypatch.setattr(
+        runner, "get_process_cmdline", lambda pid: ["python", "-m", "tg_signer", "new"]
+    )
+    monkeypatch.setattr(runner, "get_process_start_ticks", lambda pid: 3333)
+
+    assert runner.process_matches_state(state) is True
+
+
 def test_stop_runner_does_not_kill_stale_pid(monkeypatch, tmp_path):
     state = runner.RunnerState(
         pid=4321,

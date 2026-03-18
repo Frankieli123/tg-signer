@@ -83,7 +83,7 @@ logger = logging.getLogger("tg-signer")
 class UIState:
     def __init__(self) -> None:
         self.workdir: Path = get_workdir(DEFAULT_WORKDIR)
-        self.log_path: Path = DEFAULT_LOG_FILE
+        self.log_path: Path = self.workdir / DEFAULT_LOG_FILE
         self.log_limit: int = 200
         self.record_filter: str = ""
         self.runner_account: str = os.environ.get("TG_ACCOUNT", "my_account")
@@ -93,9 +93,11 @@ class UIState:
 
     def set_workdir(self, path_str: str) -> None:
         self.workdir = get_workdir(Path(path_str).expanduser())
+        self.log_path = self.workdir / DEFAULT_LOG_FILE
 
     def set_log_path(self, path_str: str) -> None:
-        self.log_path = Path(path_str).expanduser()
+        path = Path(path_str or DEFAULT_LOG_FILE).expanduser()
+        self.log_path = path if path.is_absolute() else self.workdir / path
 
 
 state = UIState()
@@ -327,7 +329,8 @@ class MonitorBlock(BaseConfigBlock):
 
 
 class RunnerControlBlock:
-    def __init__(self):
+    def __init__(self, on_refresh_all: Callable[[], None] | None = None):
+        self.on_refresh_all = on_refresh_all
         self.session_choices: dict[str, SessionAccount] = {}
         self.status_label = None
         self.detail_label = None
@@ -362,9 +365,9 @@ class RunnerControlBlock:
                     tone="info",
                 )
                 self.webui_label, self.webui_hint = build_stat_card(
-                    "WebUI 进程",
-                    "`tg-signer webgui` 默认占用当前终端。",
-                    tone="warning",
+                    "当前账户",
+                    "显示当前选择账户与默认日志。",
+                    tone="info",
                 )
 
             with ui.card().classes("w-full shadow-none border border-gray-200"):
@@ -446,7 +449,7 @@ class RunnerControlBlock:
                 self.start_btn = ui.button("启动选中任务", color="primary")
                 self.stop_btn = ui.button("停止当前账户", color="negative")
                 self.restart_btn = ui.button("重启当前账户").props("outline")
-                ui.button("刷新状态", on_click=self.refresh).props("outline")
+                ui.button("刷新状态", on_click=self.refresh_all).props("outline")
 
             self.start_btn.on_click(self.start_selected)
             self.stop_btn.on_click(self.stop_current)
@@ -558,6 +561,11 @@ class RunnerControlBlock:
         if entry is not None:
             self._apply_session_entry(entry)
         self.select_saved_tasks()
+
+    def refresh_all(self) -> None:
+        if self.on_refresh_all is not None:
+            self.on_refresh_all()
+            return
         self.refresh()
 
     def _current_runner_status(self) -> tuple[str, object | None]:
@@ -585,6 +593,7 @@ class RunnerControlBlock:
         _, runner_state = self._current_runner_status()
         self.task_select.value = runner_state.task_names if runner_state else []
         self.task_select.update()
+        self.refresh_all()
 
     def _selected_tasks(self) -> list[str]:
         value = self.task_select.value or []
@@ -667,20 +676,23 @@ class RunnerControlBlock:
 
         self.mode_label.text = "后台常驻"
         self.mode_hint.text = "每个账户会独立启动后台子进程，浏览器关闭不影响执行。"
-        self.webui_label.text = "默认前台"
-        self.webui_hint.text = (
-            "`tg-signer webgui` 本身会占用当前终端；要放后台请用 systemd、tmux 或 nohup。"
-        )
-        self.mode_label.update()
-        self.mode_hint.update()
-        self.webui_label.update()
-        self.webui_hint.update()
-
         runner_log_path = get_runner_log_file(
             state.workdir,
             account=state.runner_account,
             session_dir=state.runner_session_dir,
         )
+        if runner_state:
+            runner_log_path = Path(runner_state.log_path).expanduser()
+        state.set_log_path(str(runner_log_path))
+        self.mode_label.update()
+        self.mode_hint.update()
+        self.webui_label.text = state.runner_account or "my_account"
+        self.webui_hint.text = (
+            f"Session: {state.runner_session_dir} | 日志: {runner_log_path}"
+        )
+        self.webui_label.update()
+        self.webui_hint.update()
+
         if runner_state:
             detail_text = (
                 f"账户: {self._current_account_label()} | "
@@ -810,7 +822,6 @@ class RunnerControlBlock:
                 self.account_select.update()
                 break
         self.select_saved_tasks()
-        self.refresh()
 
     def stop_specific_runner(
         self, runner_id: str | None, account: str, session_dir: str
@@ -825,7 +836,7 @@ class RunnerControlBlock:
             ui.notify(f"已停止账户 {account}", type="positive")
         except Exception as exc:  # noqa: BLE001
             notify_error(exc)
-        self.refresh()
+        self.refresh_all()
 
     def restart_specific_runner(self, account: str, session_dir: str) -> None:
         self.select_runner_account(account, session_dir)
@@ -849,7 +860,7 @@ class RunnerControlBlock:
             )
         except Exception as exc:  # noqa: BLE001
             notify_error(exc)
-        self.refresh()
+        self.refresh_all()
 
     def stop_current(self) -> None:
         try:
@@ -865,7 +876,7 @@ class RunnerControlBlock:
                 ui.notify(f"已停止账户 {account} 的签到进程", type="positive")
         except Exception as exc:  # noqa: BLE001
             notify_error(exc)
-        self.refresh()
+        self.refresh_all()
 
     def restart_selected(self) -> None:
         try:
@@ -890,7 +901,7 @@ class RunnerControlBlock:
             )
         except Exception as exc:  # noqa: BLE001
             notify_error(exc)
-        self.refresh()
+        self.refresh_all()
 
 
 def user_info_block() -> Callable[[], None]:
@@ -1084,28 +1095,33 @@ def log_block() -> Callable[[], None]:
                     path_str = str(path)
                     if path_str not in options:
                         options.append(path_str)
-            current_path = str(log_path_input.value or state.log_path)
+            for _, runner_state in list_runner_statuses(state.workdir):
+                path_str = str(Path(runner_state.log_path).expanduser())
+                if path_str not in options:
+                    options.append(path_str)
+            current_path = str(state.log_path)
             if current_path and current_path not in options:
                 options.insert(0, current_path)
             log_select.options = options
             log_select.value = current_path
             log_select.update()
+            log_path_input.value = current_path
+            log_path_input.update()
 
         def select_log_file(path_value: str | None) -> None:
             if not path_value:
                 return
-            log_path_input.value = path_value
-            log_path_input.update()
+            state.set_log_path(path_value)
             refresh()
 
         def refresh() -> None:
-            refresh_log_options()
             try:
                 state.log_limit = int(limit_input.value or state.log_limit)
             except ValueError:
                 state.log_limit = 200
             state.set_log_path(log_path_input.value or str(DEFAULT_LOG_FILE))
-            path, lines = load_logs(state.log_limit, log_path_input.value)
+            refresh_log_options()
+            path, lines = load_logs(state.log_limit, state.log_path)
             log_list.clear()
             if not lines:
                 with log_list:
@@ -1271,7 +1287,7 @@ def _build_dashboard(container) -> None:
                 ui.label("Web 页面负责控制，任务本身在后台子进程执行。").classes(
                     "text-gray-600"
                 )
-                refreshers.append(RunnerControlBlock())
+                refreshers.append(RunnerControlBlock(refresh_all))
 
             with ui.tab_panel(tab_users):
                 ui.label("查看当前已登录账户信息 (users/*/me.json)。").classes(
