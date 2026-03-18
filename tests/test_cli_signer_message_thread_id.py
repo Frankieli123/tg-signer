@@ -14,6 +14,23 @@ class DummySigner:
         if coroutine is not None:
             asyncio.run(coroutine)
 
+    async def run(
+        self,
+        num_of_dialogs,
+        only_once=False,
+        force_rerun=False,
+        wait_until_scheduled=False,
+    ):
+        self.calls.append(
+            {
+                "method": "run",
+                "num_of_dialogs": num_of_dialogs,
+                "only_once": only_once,
+                "force_rerun": force_rerun,
+                "wait_until_scheduled": wait_until_scheduled,
+            }
+        )
+
     async def send_text(
         self, chat_id, text, delete_after=None, message_thread_id=None, **kwargs
     ):
@@ -93,6 +110,17 @@ def dummy_signer(monkeypatch):
     return dummy
 
 
+def patch_task_list(monkeypatch, task_names):
+    class DummyTaskLister:
+        def __init__(self, *args, **kwargs):
+            del args, kwargs
+
+        def get_task_list(self):
+            return list(task_names)
+
+    monkeypatch.setattr(signer_cli, "UserSigner", DummyTaskLister)
+
+
 def test_send_text_supports_message_thread_id(dummy_signer, runner):
     result = runner.invoke(
         signer_cli.tg_signer,
@@ -144,3 +172,74 @@ def test_list_topics(dummy_signer, runner):
     assert dummy_signer.calls[0]["method"] == "list_topics"
     assert dummy_signer.calls[0]["chat_id"] == -1003763902761
     assert dummy_signer.calls[0]["limit"] == 50
+
+
+def test_run_supports_wait_until_scheduled(dummy_signer, runner):
+    result = runner.invoke(
+        signer_cli.tg_signer,
+        ["run", "--wait-until-scheduled", "morning_task", "evening_task"],
+    )
+
+    assert result.exit_code == 0
+    assert [call["method"] for call in dummy_signer.calls] == ["run", "run"]
+    assert all(call["wait_until_scheduled"] is True for call in dummy_signer.calls)
+
+
+def test_multi_run_supports_wait_until_scheduled(dummy_signer, runner):
+    result = runner.invoke(
+        signer_cli.tg_signer,
+        [
+            "multi-run",
+            "--wait-until-scheduled",
+            "-a",
+            "acct_a",
+            "-a",
+            "acct_b",
+            "shared_task",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert [call["method"] for call in dummy_signer.calls] == ["run", "run"]
+    assert all(call["wait_until_scheduled"] is True for call in dummy_signer.calls)
+
+
+def test_start_discovers_all_tasks_and_waits_by_default(
+    monkeypatch, dummy_signer, runner
+):
+    patch_task_list(monkeypatch, ["dibao", "beejrfy"])
+
+    result = runner.invoke(
+        signer_cli.tg_signer,
+        ["start"],
+    )
+
+    assert result.exit_code == 0
+    assert "自动发现任务: beejrfy, dibao" in result.output
+    assert [call["method"] for call in dummy_signer.calls] == ["run", "run"]
+    assert all(call["wait_until_scheduled"] is True for call in dummy_signer.calls)
+
+
+def test_start_supports_alias_run_all(monkeypatch, dummy_signer, runner):
+    patch_task_list(monkeypatch, ["dibao"])
+
+    result = runner.invoke(
+        signer_cli.tg_signer,
+        ["run_all"],
+    )
+
+    assert result.exit_code == 0
+    assert dummy_signer.calls[0]["method"] == "run"
+    assert dummy_signer.calls[0]["wait_until_scheduled"] is True
+
+
+def test_start_fails_when_no_tasks_found(monkeypatch, runner):
+    patch_task_list(monkeypatch, [])
+
+    result = runner.invoke(
+        signer_cli.tg_signer,
+        ["start"],
+    )
+
+    assert result.exit_code != 0
+    assert "No sign tasks found under workdir" in result.output

@@ -2,11 +2,11 @@ import asyncio
 import pathlib
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from tg_signer.config import SendTextAction, SignChatV3
+from tg_signer.config import SendTextAction, SignChatV3, SignConfigV3
 from tg_signer.core import (
     BaseUserWorker,
     ChatType,
@@ -711,6 +711,118 @@ async def test_call_telegram_api_is_serialized_for_same_account(
     )
 
     assert max_active == 1
+
+
+@pytest.mark.asyncio
+async def test_normal_run_waits_until_scheduled_before_first_execution(
+    monkeypatch, signer_factory
+):
+    import tg_signer.core as core
+
+    signer = signer_factory()
+    signer.user = SimpleNamespace(id=1)
+    signer.login = AsyncMock()
+    signer.load_config = lambda *_args, **_kwargs: SignConfigV3(
+        chats=[SignChatV3(chat_id=10001, actions=[SendTextAction(text="hello")])],
+        sign_at="0 9 * * *",
+        random_seconds=0,
+        sign_interval=0,
+    )
+    signer.load_sign_record = lambda: {}
+    signer.sign_a_chat = AsyncMock()
+
+    class DummyApp:
+        def __init__(self):
+            self.handlers = []
+
+        def add_handler(self, handler):
+            self.handlers.append(handler)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    signer.app = DummyApp()
+
+    now = datetime(2026, 3, 18, 8, 0, tzinfo=timezone.utc)
+    first_run_at = datetime(2026, 3, 18, 9, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(core, "get_now", lambda: now)
+    signer.get_next_run_time = MagicMock(return_value=first_run_at)
+
+    waits = []
+
+    class StopLoop(Exception):
+        pass
+
+    async def fake_sleep(seconds):
+        waits.append(seconds)
+        raise StopLoop()
+
+    monkeypatch.setattr(core.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(StopLoop):
+        await signer.normal_run(wait_until_scheduled=True)
+
+    assert waits == [(first_run_at - now).total_seconds()]
+    signer.sign_a_chat.assert_not_awaited()
+    assert len(signer.app.handlers) == 2
+
+
+@pytest.mark.asyncio
+async def test_normal_run_registers_handlers_only_once(monkeypatch, signer_factory):
+    import tg_signer.core as core
+
+    signer = signer_factory()
+    signer.user = SimpleNamespace(id=1)
+    signer.login = AsyncMock()
+    signer.load_config = lambda *_args, **_kwargs: SignConfigV3(
+        chats=[SignChatV3(chat_id=10001, actions=[SendTextAction(text="hello")])],
+        sign_at="0 9 * * *",
+        random_seconds=0,
+        sign_interval=0,
+    )
+    signer.load_sign_record = lambda: {}
+    signer.sign_a_chat = AsyncMock()
+
+    class DummyApp:
+        def __init__(self):
+            self.handlers = []
+
+        def add_handler(self, handler):
+            self.handlers.append(handler)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    signer.app = DummyApp()
+
+    fixed_now = datetime(2026, 3, 18, 9, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(core, "get_now", lambda: fixed_now)
+
+    class StopLoop(Exception):
+        pass
+
+    wait_calls = 0
+
+    async def fake_sleep(seconds):
+        nonlocal wait_calls
+        if seconds > 0:
+            wait_calls += 1
+            if wait_calls >= 2:
+                raise StopLoop()
+
+    monkeypatch.setattr(core.asyncio, "sleep", fake_sleep)
+
+    with pytest.raises(StopLoop):
+        await signer.normal_run()
+
+    signer.sign_a_chat.assert_awaited_once()
+    assert len(signer.app.handlers) == 2
 
 
 @pytest.mark.asyncio

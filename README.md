@@ -84,6 +84,7 @@ Commands:
   reconfig                重新配置
   run                     根据任务配置运行签到
   run-once                运行一次签到任务，即使该签到任务今日已执行过
+  start                   自动发现并运行当前workdir下全部签到任务
   schedule-messages       批量配置Telegram自带的定时发送消息功能
   send-dice               发送一次DICE消息, 请确保当前会话已经"见过"该`chat_id`。...
   send-text               发送一次文本消息, 请确保当前会话已经"见过"该`chat_id`
@@ -97,6 +98,8 @@ Commands:
 ```sh
 tg-signer run
 tg-signer run my_sign  # 不询问，直接运行'my_sign'任务
+tg-signer start  # 自动运行当前workdir下全部签到任务，默认启动后不补发
+tg-signer start --catch-up-on-start  # 自动运行全部签到任务，并保留启动补发行为
 tg-signer run-once my_sign  # 直接运行一次'my_sign'任务
 tg-signer send-text 8671234001 /test  # 向chat_id为'8671234001'的聊天发送'/test'文本
 tg-signer send-text --message-thread-id 1 -- -1003763902761 checkin  # 发送到群组话题(message_thread_id=1)
@@ -109,6 +112,55 @@ tg-signer schedule-messages --crontab '0 0 * * *' --next-times 3 --message-threa
 tg-signer monitor run  # 配置个人、群组、频道消息监控与自动回复
 tg-signer multi-run -a account_a -a account_b same_task  # 使用'same_task'的配置同时运行'account_a'和'account_b'两个账号
 tg-signer webgui --auth-code averycomplexcode  # 启动一个WebGUI
+```
+
+关于 WebUI 运行方式：
+
+- `tg-signer webgui` 默认前台运行，会占用当前终端
+- 在 WebUI 里点击“启动选中任务”后，签到任务会以独立后台子进程运行
+- 浏览器关闭不影响已启动任务；即使 WebUI 进程退出，已拉起的任务也会继续运行
+- 如果你希望 WebUI 本身也在后台运行，建议使用 `systemd`、`tmux` 或 `nohup`
+
+#### 用 systemd 让 WebUI 开机自启
+
+对于 Debian / Ubuntu，推荐新建 `/etc/systemd/system/tg-signer-webui.service`：
+
+项目里也附带了一个可直接改的模板文件：
+
+- [tg-signer-webui.service.example](./tg-signer-webui.service.example)
+
+```ini
+[Unit]
+Description=tg-signer WebUI
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tg-signer
+Environment=TG_SIGNER_WORKDIR=/root/.signer
+Environment=TG_SIGNER_GUI_AUTHCODE=your-auth-code
+ExecStart=/root/.local/bin/tg-signer webgui -H 0.0.0.0 -P 8080
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+说明：
+
+- `ExecStart` 改成你机器上 `tg-signer` 的真实路径
+- `TG_SIGNER_WORKDIR` 改成你的工作目录
+- `TG_SIGNER_GUI_AUTHCODE` 或 `--auth-code` 建议保留
+- 如果你是 `pipx --editable /opt/tg-signer[gui]` 这种装法，`WorkingDirectory=/opt/tg-signer` 更合适
+
+启用命令：
+
+```sh
+systemctl daemon-reload
+systemctl enable --now tg-signer-webui
+systemctl status tg-signer-webui
 ```
 
 ### 配置代理（如有需要）

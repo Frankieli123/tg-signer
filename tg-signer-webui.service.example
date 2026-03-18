@@ -1,0 +1,16 @@
+[Unit]
+Description=tg-signer WebUI
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tg-signer
+Environment=TG_SIGNER_WORKDIR=/root/.signer
+Environment=TG_SIGNER_GUI_AUTHCODE=change-me
+ExecStart=/root/.local/bin/tg-signer webgui -H 0.0.0.0 -P 8080
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,5 +1,6 @@
 import json
 import os
+import sqlite3
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,10 +45,193 @@ class SignRecord:
     path: Path
 
 
+@dataclass
+class SessionAccount:
+    account: str
+    session_dir: str
+    path: Path
+    user_id: Optional[str] = None
+    display_name: str = ""
+    is_bot: Optional[bool] = None
+
+
 def get_workdir(workdir: Optional[Path | str] = None) -> Path:
     base = Path(workdir) if workdir else DEFAULT_WORKDIR
     base.mkdir(parents=True, exist_ok=True)
     return base
+
+
+def _normalize_json_value(value: Any) -> Any:
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("{") or stripped.startswith("["):
+            try:
+                return json.loads(stripped)
+            except json.JSONDecodeError:
+                return value
+    return value
+
+
+def resolve_workdir_path(
+    path_str: Optional[Path | str],
+    workdir: Optional[Path | str] = None,
+) -> Path:
+    raw = Path(path_str).expanduser() if path_str else Path(".")
+    if raw.is_absolute():
+        return raw
+    return get_workdir(workdir) / raw
+
+
+def resolve_session_dir(
+    session_dir: Optional[Path | str],
+    workdir: Optional[Path | str] = None,
+) -> Path:
+    path = resolve_workdir_path(session_dir, workdir)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def list_account_names(
+    session_dir: Optional[Path | str] = None,
+    workdir: Optional[Path | str] = None,
+) -> List[str]:
+    base = resolve_session_dir(session_dir, workdir)
+    accounts = set()
+    for path in base.iterdir():
+        if not path.is_file():
+            continue
+        if path.suffix == ".session":
+            accounts.add(path.stem)
+        elif path.name.endswith(".session_string"):
+            accounts.add(path.name[: -len(".session_string")])
+    return sorted(accounts)
+
+
+def build_account_options(
+    session_dir: Optional[Path | str] = None,
+    workdir: Optional[Path | str] = None,
+    preferred_accounts: Iterable[Optional[str]] = (),
+) -> List[str]:
+    merged: List[str] = []
+    for account in preferred_accounts:
+        if account is None:
+            continue
+        name = str(account).strip()
+        if name and name not in merged:
+            merged.append(name)
+    for account in list_account_names(session_dir, workdir):
+        if account not in merged:
+            merged.append(account)
+    return merged
+
+
+def _user_display_name(data: Dict[str, Any]) -> str:
+    return (
+        str(data.get("first_name") or "").strip()
+        or str(data.get("username") or "").strip()
+        or str(data.get("last_name") or "").strip()
+    )
+
+
+def _read_session_user_meta(session_file: Path) -> tuple[Optional[str], Optional[bool]]:
+    try:
+        with sqlite3.connect(session_file) as conn:
+            row = conn.execute(
+                "SELECT user_id, is_bot FROM sessions LIMIT 1"
+            ).fetchone()
+    except (sqlite3.Error, OSError):
+        return None, None
+    if not row:
+        return None, None
+    user_id = str(row[0]) if row[0] is not None else None
+    is_bot = bool(row[1]) if row[1] is not None else None
+    return user_id, is_bot
+
+
+def _candidate_session_dirs(
+    session_dir: Optional[Path | str] = None,
+    workdir: Optional[Path | str] = None,
+    search_dirs: Optional[Iterable[Path | str]] = None,
+) -> List[Path]:
+    if search_dirs is not None:
+        candidates = [Path(p).expanduser() for p in search_dirs]
+    else:
+        workdir_path = get_workdir(workdir)
+        candidates = [
+            resolve_workdir_path(session_dir, workdir),
+            workdir_path,
+            workdir_path.parent,
+            Path.cwd().expanduser(),
+            Path.home().expanduser(),
+        ]
+        env_session_dir = os.environ.get("TG_SIGNER_SESSION_DIR")
+        if env_session_dir:
+            candidates.append(resolve_workdir_path(env_session_dir, workdir))
+
+    unique: List[Path] = []
+    seen: set[str] = set()
+    for path in candidates:
+        try:
+            normalized = str(path.resolve())
+        except OSError:
+            normalized = str(path)
+        if normalized in seen or not path.is_dir():
+            continue
+        seen.add(normalized)
+        unique.append(path)
+    return unique
+
+
+def discover_session_accounts(
+    session_dir: Optional[Path | str] = None,
+    workdir: Optional[Path | str] = None,
+    search_dirs: Optional[Iterable[Path | str]] = None,
+) -> List[SessionAccount]:
+    user_map = {entry.user_id: entry.data for entry in load_user_infos(workdir)}
+    discovered: Dict[tuple[str, str], SessionAccount] = {}
+
+    for base in _candidate_session_dirs(session_dir, workdir, search_dirs):
+        for path in sorted(base.iterdir(), key=lambda p: p.name):
+            if not path.is_file():
+                continue
+            user_id = None
+            is_bot = None
+            if path.suffix == ".session":
+                account = path.stem
+                user_id, is_bot = _read_session_user_meta(path)
+            elif path.name.endswith(".session_string"):
+                account = path.name[: -len(".session_string")]
+            else:
+                continue
+
+            key = (str(base.resolve()), account)
+            display_name = ""
+            if user_id and user_id in user_map:
+                display_name = _user_display_name(user_map[user_id])
+
+            current = discovered.get(key)
+            candidate = SessionAccount(
+                account=account,
+                session_dir=str(base.resolve()),
+                path=path,
+                user_id=user_id,
+                display_name=display_name,
+                is_bot=is_bot,
+            )
+            if current is None:
+                discovered[key] = candidate
+                continue
+            if current.user_id is None and candidate.user_id is not None:
+                discovered[key] = candidate
+
+    return sorted(
+        discovered.values(),
+        key=lambda item: (
+            (item.display_name or item.account).lower(),
+            item.user_id or "",
+            item.session_dir,
+        ),
+    )
 
 
 def _config_root(kind: ConfigKind, workdir: Optional[Path | str]) -> Path:
@@ -146,6 +330,9 @@ def load_user_infos(workdir: Optional[Path | str] = None) -> List[UserInfo]:
                 data = json.load(fp)
             except json.JSONDecodeError:
                 continue
+        data = _normalize_json_value(data)
+        if not isinstance(data, dict):
+            data = {"raw": data}
 
         latest_chats = []
         chats_file = user_dir / "latest_chats.json"
@@ -155,6 +342,9 @@ def load_user_infos(workdir: Optional[Path | str] = None) -> List[UserInfo]:
                     latest_chats = json.load(fp)
                 except json.JSONDecodeError:
                     pass
+        latest_chats = _normalize_json_value(latest_chats)
+        if not isinstance(latest_chats, list):
+            latest_chats = []
 
         entries.append(
             UserInfo(

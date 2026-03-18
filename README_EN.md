@@ -73,6 +73,7 @@ Commands:
   reconfig                Reconfigure
   run                     Run check-in tasks based on config
   run-once                Run check-in task once (even if already executed today)
+  start                   Auto-discover and run all sign tasks in the current workdir
   schedule-messages       Batch configure Telegram's native scheduled messages
   send-text               Send one message (ensure session has "seen" the `chat_id`)
   version                 Show version
@@ -83,6 +84,8 @@ Examples:
 ```sh
 tg-signer run
 tg-signer run my_sign  # Run 'my_sign' task without confirmation
+tg-signer start  # Auto-run all sign tasks in the current workdir, no catch-up on startup by default
+tg-signer start --catch-up-on-start  # Auto-run all sign tasks and keep the old catch-up behavior
 tg-signer run-once my_sign  # Run 'my_sign' task once
 tg-signer send-text 8671234001 /test  # Send '/test' to chat_id '8671234001'
 tg-signer send-text --message-thread-id 1 -- -1003763902761 checkin  # Send to a group topic (message_thread_id=1)
@@ -97,6 +100,55 @@ tg-signer multi-run -a account_a -a account_b same_task  # Run 'account_a' and '
 ```
 
 ### Proxy Configuration (if needed)
+
+About WebUI runtime behavior:
+
+- `tg-signer webgui` runs in the foreground by default and occupies the current terminal
+- Tasks started from the WebUI run as independent background subprocesses
+- Closing the browser does not stop those tasks; they can keep running even if the WebUI process exits
+- If you also want the WebUI itself to stay in the background, use `systemd`, `tmux`, or `nohup`
+
+#### Auto-start WebUI with systemd
+
+On Debian / Ubuntu, create `/etc/systemd/system/tg-signer-webui.service`:
+
+The repo also includes a ready-to-edit template:
+
+- [tg-signer-webui.service.example](./tg-signer-webui.service.example)
+
+```ini
+[Unit]
+Description=tg-signer WebUI
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/tg-signer
+Environment=TG_SIGNER_WORKDIR=/root/.signer
+Environment=TG_SIGNER_GUI_AUTHCODE=your-auth-code
+ExecStart=/root/.local/bin/tg-signer webgui -H 0.0.0.0 -P 8080
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Notes:
+
+- Replace `ExecStart` with the real path to `tg-signer` on your machine
+- Replace `TG_SIGNER_WORKDIR` with your actual workdir
+- Keeping `TG_SIGNER_GUI_AUTHCODE` or `--auth-code` is recommended
+- If you installed with `pipx --editable /opt/tg-signer[gui]`, `WorkingDirectory=/opt/tg-signer` is a better default
+
+Enable it with:
+
+```sh
+systemctl daemon-reload
+systemctl enable --now tg-signer-webui
+systemctl status tg-signer-webui
+```
 
 `tg-signer` doesn't read system proxy. Use `TG_PROXY` env var or `--proxy` parameter:
 

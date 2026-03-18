@@ -10,7 +10,11 @@ from tg_signer.core import UserSigner, get_proxy
 
 
 class AliasedGroup(click.Group):
-    _aliases = {"run_once": "run-once", "send_text": "send-text"}
+    _aliases = {
+        "run_once": "run-once",
+        "send_text": "send-text",
+        "run_all": "start",
+    }
 
     def __init__(self, name, aliases: dict[str, str] = None, *args, **kwargs):
         self.aliases = self._aliases.copy()
@@ -55,6 +59,24 @@ def get_signer(
         loop=loop,
     )
     return signer
+
+
+def run_sign_tasks(task_names, obj, num_of_dialogs, wait_until_scheduled=False):
+    task_names = list(task_names)
+    if len(task_names) < 1:
+        raise click.UsageError("At least one task name is required")
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    coros = []
+    for task_name in task_names:
+        signer = get_signer(task_name, obj, loop=loop)
+        coros.append(
+            signer.run(
+                num_of_dialogs,
+                wait_until_scheduled=wait_until_scheduled,
+            )
+        )
+    loop.run_until_complete(asyncio.gather(*coros))
 
 
 @click.group(name="tg-signer", help="使用<子命令> --help查看使用说明", cls=AliasedGroup)
@@ -221,17 +243,46 @@ def logout(obj):
     type=int,
     help="获取最近N个对话, 请确保想要签到的对话在最近N个对话内",
 )
+@click.option(
+    "--wait-until-scheduled",
+    "wait_until_scheduled",
+    default=False,
+    is_flag=True,
+    help="启动后不立即补发，等待下一次计划时间再执行",
+)
 @click.pass_obj
-def run(obj, task_names, num_of_dialogs):
+def run(obj, task_names, num_of_dialogs, wait_until_scheduled):
+    run_sign_tasks(task_names, obj, num_of_dialogs, wait_until_scheduled)
+
+
+@tg_signer.command(
+    name="start",
+    help="自动发现并运行当前workdir下全部签到任务，默认启动后不补发",
+)
+@click.option(
+    "--num-of-dialogs",
+    "-n",
+    default=50,
+    show_default=True,
+    type=int,
+    help="获取最近N个对话, 请确保想要签到的对话在最近N个对话内",
+)
+@click.option(
+    "--wait-until-scheduled/--catch-up-on-start",
+    "wait_until_scheduled",
+    default=True,
+    show_default=True,
+    help="是否等待下一次计划时间再执行",
+)
+@click.pass_obj
+def start(obj, num_of_dialogs, wait_until_scheduled):
+    task_names = sorted(UserSigner(workdir=obj["workdir"]).get_task_list())
     if len(task_names) < 1:
-        raise click.UsageError("At least one task name is required")
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    coros = []
-    for task_name in task_names:
-        signer = get_signer(task_name, obj, loop=loop)
-        coros.append(signer.run(num_of_dialogs))
-    loop.run_until_complete(asyncio.gather(*coros))
+        raise click.UsageError(
+            f"No sign tasks found under workdir: {obj['workdir']}"
+        )
+    click.echo(f"自动发现任务: {', '.join(task_names)}")
+    run_sign_tasks(task_names, obj, num_of_dialogs, wait_until_scheduled)
 
 
 @tg_signer.command(help="运行一次签到任务，即使该签到任务今日已执行过")
@@ -508,8 +559,15 @@ def list_schedule_messages(obj, chat_id):
     type=int,
     help="获取最近N个对话, 请确保想要签到的对话在最近N个对话内",
 )
+@click.option(
+    "--wait-until-scheduled",
+    "wait_until_scheduled",
+    default=False,
+    is_flag=True,
+    help="启动后不立即补发，等待下一次计划时间再执行",
+)
 @click.pass_obj
-def multi_run(obj, accounts, task_name, num_of_dialogs):
+def multi_run(obj, accounts, task_name, num_of_dialogs, wait_until_scheduled):
     logger = logging.getLogger("tg-signer")
     logger.info(f"开始使用一套配置({task_name})同时运行多个账号..")
     loop = asyncio.new_event_loop()
@@ -518,7 +576,12 @@ def multi_run(obj, accounts, task_name, num_of_dialogs):
     for account in accounts:
         obj["account"] = account
         signer = get_signer(task_name, obj, loop=loop)
-        coros.append(signer.run(num_of_dialogs))
+        coros.append(
+            signer.run(
+                num_of_dialogs,
+                wait_until_scheduled=wait_until_scheduled,
+            )
+        )
     loop.run_until_complete(asyncio.gather(*coros))
 
 

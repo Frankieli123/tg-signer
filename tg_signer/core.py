@@ -901,6 +901,24 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
                 sign_record = json.load(fp)
         return sign_record
 
+    def _register_sign_handlers(self, chat_ids: list[int]):
+        if getattr(self, "_sign_handlers_registered", False):
+            return
+        self.log(f"为以下Chat添加消息回调处理函数：{chat_ids}")
+        self.app.add_handler(MessageHandler(self.on_message, filters.chat(chat_ids)))
+        self.app.add_handler(
+            EditedMessageHandler(self.on_edited_message, filters.chat(chat_ids))
+        )
+        self._sign_handlers_registered = True
+
+    def get_next_run_time(
+        self, sign_at: str, now: datetime, random_seconds: int = 0
+    ) -> datetime:
+        cron_it = croniter(self._validate_sign_at(sign_at), now)
+        return cron_it.next(datetime) + timedelta(
+            seconds=random.randint(0, int(random_seconds))
+        )
+
     async def sign_a_chat(
         self,
         chat: SignChatV3,
@@ -914,26 +932,47 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             await asyncio.sleep(chat.action_interval)
 
     async def run(
-        self, num_of_dialogs=20, only_once: bool = False, force_rerun: bool = False
+        self,
+        num_of_dialogs=20,
+        only_once: bool = False,
+        force_rerun: bool = False,
+        wait_until_scheduled: bool = False,
     ):
         if self.app.in_memory or self.app.session_string:
             return await self.in_memory_run(
-                num_of_dialogs, only_once=only_once, force_rerun=force_rerun
+                num_of_dialogs,
+                only_once=only_once,
+                force_rerun=force_rerun,
+                wait_until_scheduled=wait_until_scheduled,
             )
         return await self.normal_run(
-            num_of_dialogs, only_once=only_once, force_rerun=force_rerun
+            num_of_dialogs,
+            only_once=only_once,
+            force_rerun=force_rerun,
+            wait_until_scheduled=wait_until_scheduled,
         )
 
     async def in_memory_run(
-        self, num_of_dialogs=20, only_once: bool = False, force_rerun: bool = False
+        self,
+        num_of_dialogs=20,
+        only_once: bool = False,
+        force_rerun: bool = False,
+        wait_until_scheduled: bool = False,
     ):
         async with self.app:
             await self.normal_run(
-                num_of_dialogs, only_once=only_once, force_rerun=force_rerun
+                num_of_dialogs,
+                only_once=only_once,
+                force_rerun=force_rerun,
+                wait_until_scheduled=wait_until_scheduled,
             )
 
     async def normal_run(
-        self, num_of_dialogs=20, only_once: bool = False, force_rerun: bool = False
+        self,
+        num_of_dialogs=20,
+        only_once: bool = False,
+        force_rerun: bool = False,
+        wait_until_scheduled: bool = False,
     ):
         if self.user is None:
             await self.login(num_of_dialogs, print_chat=True)
@@ -944,6 +983,8 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
 
         sign_record = self.load_sign_record()
         chat_ids = [c.chat_id for c in config.chats]
+        skip_run_on_start = wait_until_scheduled and not (only_once or force_rerun)
+        self._register_sign_handlers(chat_ids)
 
         async def sign_once():
             for chat in config.chats:
@@ -977,13 +1018,16 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
             return True
 
         while True:
-            self.log(f"为以下Chat添加消息回调处理函数：{chat_ids}")
-            self.app.add_handler(
-                MessageHandler(self.on_message, filters.chat(chat_ids))
-            )
-            self.app.add_handler(
-                EditedMessageHandler(self.on_edited_message, filters.chat(chat_ids))
-            )
+            if skip_run_on_start:
+                now = get_now()
+                next_run = self.get_next_run_time(
+                    config.sign_at,
+                    now,
+                    config.random_seconds,
+                )
+                self.log(f"启动后等待首次计划执行时间: {next_run}")
+                await asyncio.sleep((next_run - now).total_seconds())
+                skip_run_on_start = False
             try:
                 async with self.app:
                     now = get_now()
@@ -1000,9 +1044,10 @@ class UserSigner(BaseUserWorker[SignConfigV3]):
 
             if only_once:
                 break
-            cron_it = croniter(self._validate_sign_at(config.sign_at), now)
-            next_run: datetime = cron_it.next(datetime) + timedelta(
-                seconds=random.randint(0, int(config.random_seconds))
+            next_run = self.get_next_run_time(
+                config.sign_at,
+                now,
+                config.random_seconds,
             )
             self.log(f"下次运行时间: {next_run}")
             await asyncio.sleep((next_run - now).total_seconds())
