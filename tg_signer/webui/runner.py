@@ -326,6 +326,7 @@ def start_runner(
     )
     env = os.environ.copy()
     env["TG_SIGNER_WORKDIR"] = str(Path(workdir).expanduser())
+    env["TG_SIGNER_DISABLE_CONSOLE_LOG"] = "1"
     with open(log_path, "ab") as fp:
         proc = subprocess.Popen(
             cmd,

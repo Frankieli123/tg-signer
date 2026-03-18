@@ -97,6 +97,7 @@ def test_start_runner_persists_state_and_spawns_subprocess(monkeypatch, tmp_path
     assert state.process_start_ticks == 9999
     assert calls["cmd"][-2:] == ["task_a", "task_b"]
     assert calls["kwargs"]["start_new_session"] is True
+    assert calls["kwargs"]["env"]["TG_SIGNER_DISABLE_CONSOLE_LOG"] == "1"
     assert runner.load_runner_state(tmp_path / ".signer") == state
 
 

@@ -42,9 +42,11 @@ def configure_logger(
     logger.handlers.clear()
     logger.propagate = False
 
-    console_handler = logging.StreamHandler()
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+    console_handler = None
+    if os.environ.get("TG_SIGNER_DISABLE_CONSOLE_LOG", "0") != "1":
+        console_handler = logging.StreamHandler()
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
 
     log_dir = pathlib.Path(log_dir)
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -82,7 +84,7 @@ def configure_logger(
         error_file_handler.setFormatter(formatter)
 
         logger.addHandler(error_file_handler)
-    if os.environ.get("PYROGRAM_LOG_ON", "0") == "1":
+    if os.environ.get("PYROGRAM_LOG_ON", "0") == "1" and console_handler is not None:
         pyrogram_logger = logging.getLogger("pyrogram")
         pyrogram_logger.setLevel(level)
         pyrogram_logger.addHandler(console_handler)
